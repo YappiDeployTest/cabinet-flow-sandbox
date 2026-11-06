@@ -21,7 +21,7 @@ jobs:
       (github.event.action != 'edited' || github.event.changes.base)
       && (github.base_ref == vars.PRODUCTION_BRANCH || vars.PRODUCTION_BRANCH == '')
     name: ${{ matrix.script }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: pr-checks-${{ github.event.pull_request.number }}-${{ matrix.script }}
       cancel-in-progress: true
@@ -37,9 +37,9 @@ jobs:
           echo "::error::Repository variable PRODUCTION_BRANCH is not set"
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
