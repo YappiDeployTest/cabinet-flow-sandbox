@@ -42,7 +42,8 @@ git merge-base --is-ancestor "$commit" "$previous" || released=$?
 
 case "$released" in
   0)
-    echo "Nothing to release: $(git rev-parse --short "$commit") is already released in ${previous}" >&2
+    # In Actions the prefix turns the line into the run's error annotation.
+    echo "${GITHUB_ACTIONS:+::error::}Nothing to release: $(git rev-parse --short "$commit") is already released in ${previous}" >&2
     exit 1
     ;;
   1) ;;
