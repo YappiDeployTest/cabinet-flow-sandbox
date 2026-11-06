@@ -1,0 +1,49 @@
+# Lint, build and test on every pull request into the production branch.
+# Each one is a separate status check, named exactly as the production ruleset
+# requires it: lint, build, test.
+#
+# The branch filter lives in the job condition, not under `on:`, because
+# `on:` cannot read repository variables. `edited` counts only when the base
+# changed, so a pull request retargeted to production gets its checks.
+
+name: PR checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: >-
+      (github.event.action != 'edited' || github.event.changes.base)
+      && (github.base_ref == vars.PRODUCTION_BRANCH || vars.PRODUCTION_BRANCH == '')
+    name: ${{ matrix.script }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pr-checks-${{ github.event.pull_request.number }}-${{ matrix.script }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [lint, build, test]
+
+    steps:
+      - name: Require the PRODUCTION_BRANCH variable
+        if: vars.PRODUCTION_BRANCH == ''
+        run: |
+          echo "::error::Repository variable PRODUCTION_BRANCH is not set"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run ${{ matrix.script }}

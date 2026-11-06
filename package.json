@@ -1,0 +1,11 @@
+{
+  "name": "cabinet-flow-sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stand-in for the Student Cabinet: lint, build and test always succeed",
+  "scripts": {
+    "lint": "echo 'lint: nothing to check in the sandbox'",
+    "build": "echo 'build: nothing to build in the sandbox'",
+    "test": "echo 'test: nothing to test in the sandbox'"
+  }
+}
