@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds and deploys the checked-out commit to one environment.
+# Builds and deploys the commit checked out in the current directory to one
+# environment.
 #
 # This is the sandbox copy: it deploys nothing and only reports in the run
 # summary what it would deploy. The Student Cabinet keeps its own copy with
