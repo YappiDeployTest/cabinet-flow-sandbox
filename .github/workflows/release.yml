@@ -1,0 +1,211 @@
+# Releases the tip of the production branch, or deploys an existing release
+# again. Started by hand only: the Run workflow button in Actions, or
+# `gh workflow run release`.
+#
+# A release lints and tests the tip, deploys it, and only after the deploy
+# succeeds tags it `web-vX.Y.Z` and publishes a GitHub Release with the pull
+# requests merged since the previous one. The version lives only in the tag:
+# nothing is committed and package.json keeps its version.
+#
+# Only members of the RELEASE_TEAM team may run it. GITHUB_TOKEN can read
+# neither team membership nor bypass the `web-v*` tag ruleset, so the
+# membership check, the tag and the release go through the bot's GitHub App
+# token (BOT_CLIENT_ID, BOT_PRIVATE_KEY).
+#
+# workflow_dispatch runs the workflow file of whatever branch it is started
+# from, so a branch could carry a copy without the membership check. The job
+# therefore runs in the `production` environment, whose secrets
+# (BOT_PRIVATE_KEY and the PROD_* deploy secrets) are released only to runs
+# started from the production branch.
+#
+# Shell steps read inputs through `env`, never through `${{ }}` inside `run`,
+# so a typed-in tag name cannot become shell code.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Part of the version to raise
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: Dry run - only report the next version and its pull requests
+        type: boolean
+        default: false
+      redeploy:
+        description: Deploy this existing web-vX.Y.Z tag again instead of releasing (rollback); bump is ignored
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    environment: production
+
+    steps:
+      - name: Check the inputs and repository variables
+        env:
+          PRODUCTION_BRANCH: ${{ vars.PRODUCTION_BRANCH }}
+          RELEASE_TEAM: ${{ vars.RELEASE_TEAM }}
+          BOT_CLIENT_ID: ${{ vars.BOT_CLIENT_ID }}
+          REDEPLOY: ${{ inputs.redeploy }}
+        run: |
+          failed=0
+          for name in PRODUCTION_BRANCH RELEASE_TEAM BOT_CLIENT_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Repository variable ${name} is not set"
+              failed=1
+            fi
+          done
+          if [[ -n "$REDEPLOY" && ! "$REDEPLOY" =~ ^web-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::redeploy takes a release tag such as web-v2.0.0, got '${REDEPLOY}'"
+            failed=1
+          fi
+          exit "$failed"
+
+      - name: Get the bot token
+        id: bot
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-members: read
+
+      - name: Check that the runner is in the release team
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          RELEASE_TEAM: ${{ vars.RELEASE_TEAM }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          if ! state="$(gh api "orgs/${ORG}/teams/${RELEASE_TEAM}/memberships/${ACTOR}" --jq .state 2> "$RUNNER_TEMP/gh-error.txt")"; then
+            if grep -q "HTTP 404" "$RUNNER_TEMP/gh-error.txt"; then
+              echo "::error::${ACTOR} is not in the ${ORG}/${RELEASE_TEAM} team, which alone may release (or the team does not exist)"
+            else
+              echo "::error::Could not read the ${ORG}/${RELEASE_TEAM} team: $(cat "$RUNNER_TEMP/gh-error.txt")"
+            fi
+            exit 1
+          fi
+          if [[ "$state" != active ]]; then
+            echo "::error::${ACTOR}'s membership in ${ORG}/${RELEASE_TEAM} is ${state}, not active"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.redeploy != '' && format('refs/tags/{0}', inputs.redeploy) || vars.PRODUCTION_BRANCH }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Work out the version
+        id: plan
+        env:
+          BUMP: ${{ inputs.bump }}
+          REDEPLOY: ${{ inputs.redeploy }}
+        run: |
+          commit="$(git rev-parse HEAD)"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$REDEPLOY" ]]; then
+            echo "tag=${REDEPLOY}" >> "$GITHUB_OUTPUT"
+          else
+            scripts/ci/release-version.sh "$BUMP" "$commit" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the dry run
+        if: ${{ inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          REDEPLOY: ${{ inputs.redeploy }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          PREVIOUS: ${{ steps.plan.outputs.previous }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          {
+            if [[ -n "$REDEPLOY" ]]; then
+              echo "### Dry run: would deploy ${TAG} again"
+              echo
+              echo "Commit \`${COMMIT::7}\`: $(git log -1 --format=%s)"
+            else
+              echo "### Dry run: next release ${TAG}"
+              echo
+              echo "From commit \`${COMMIT::7}\`, previous release: ${PREVIOUS:-none}."
+              echo
+              notes=(-f "tag_name=${TAG}" -f "target_commitish=${COMMIT}")
+              if [[ -n "$PREVIOUS" ]]; then
+                notes+=(-f "previous_tag_name=${PREVIOUS}")
+              fi
+              gh api "repos/${GH_REPO}/releases/generate-notes" "${notes[@]}" --jq .body
+            fi
+            echo
+            echo "Nothing was built, deployed or tagged."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v7
+        if: ${{ !inputs.dry_run }}
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - if: ${{ !inputs.dry_run }}
+        run: npm ci
+
+      - if: ${{ !inputs.dry_run && inputs.redeploy == '' }}
+        run: npm run lint
+
+      - if: ${{ !inputs.dry_run && inputs.redeploy == '' }}
+        run: npm test
+
+      # The Cabinet's deploy.sh reads the PROD_* secrets; the sandbox has none
+      # and its deploy.sh needs none.
+      - name: Deploy
+        if: ${{ !inputs.dry_run }}
+        env:
+          PROD_DEPLOY_KEY: ${{ secrets.PROD_DEPLOY_KEY }}
+          PROD_DEPLOY_HOST: ${{ secrets.PROD_DEPLOY_HOST }}
+          PROD_DEPLOY_USER: ${{ secrets.PROD_DEPLOY_USER }}
+          PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+          PROD_DEPLOY_MANIFEST_PATH: ${{ secrets.PROD_DEPLOY_MANIFEST_PATH }}
+        run: scripts/ci/deploy.sh production
+
+      - name: Tag and publish the release
+        if: ${{ !inputs.dry_run && inputs.redeploy == '' }}
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          PREVIOUS: ${{ steps.plan.outputs.previous }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          release=(--target "$COMMIT" --title "$TAG" --generate-notes --latest)
+          if [[ -n "$PREVIOUS" ]]; then
+            release+=(--notes-start-tag "$PREVIOUS")
+          fi
+          url="$(gh release create "$TAG" "${release[@]}")"
+          {
+            echo "### Released ${TAG}"
+            echo
+            echo "${url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the redeploy
+        if: ${{ !inputs.dry_run && inputs.redeploy != '' }}
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          {
+            echo "### Deployed ${TAG} again"
+            echo
+            echo "No new version and no new tag."
+          } >> "$GITHUB_STEP_SUMMARY"
