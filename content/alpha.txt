@@ -7,3 +7,4 @@ alpha line 6
 alpha line 7
 alpha line 8
 alpha line 9
+Release minor scenario.
