@@ -31,6 +31,9 @@
 # it starts from a fresher list, so staging never goes back to an older one.
 # Dry runs have a group of their own, so that one never cancels a real build.
 #
+# The job is not called `build`: the skipped runs on every push would show
+# on pull requests under the name of the required `build` check.
+#
 # Filters on branches live in the job condition, not under `on:`, because
 # `on:` cannot read repository variables.
 
@@ -53,7 +56,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  build:
+  development:
     if: >-
       (github.event_name == 'workflow_dispatch')
       || (github.event_name == 'push' && github.ref_name == vars.PRODUCTION_BRANCH)
